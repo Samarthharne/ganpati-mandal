@@ -1,9 +1,6 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
+@custom-variant dark (&:is(.dark *));
 
 @theme inline {
   --color-background: var(--background);
@@ -12,15 +9,72 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+:root {
+  --background: #fff9f4;
+  --foreground: #2d160d;
+  --app-bg: #fff9f4;
+  --muted: #8b6a5b;
+  --border: rgba(150, 103, 78, 0.16);
+  --primary: #b65114;
+  --danger: #b42318;
+  --soft-orange: #fff2e5;
+  --hero-gradient: linear-gradient(135deg, #bb5c17 0%, #7e1838 100%);
+  --saffron-gradient: linear-gradient(135deg, #c8671e 0%, #8a1d3f 100%);
+}
+
+.dark {
+  --background: #16120f;
+  --foreground: #fff6ef;
+  --app-bg: #16120f;
+  --muted: #bda593;
+  --border: rgba(255, 219, 190, 0.12);
+  --primary: #ffab4d;
+  --danger: #ff7f73;
+  --soft-orange: rgba(255, 171, 77, 0.12);
+  --hero-gradient: linear-gradient(135deg, #6e3c13 0%, #441125 100%);
+  --saffron-gradient: linear-gradient(135deg, #824517 0%, #56142a 100%);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--app-bg);
 }
 
 body {
-  background: var(--background);
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at top, rgba(255, 196, 112, 0.15), transparent 36%),
+    var(--app-bg);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+}
+
+.bg-saffron-gradient {
+  background: var(--saffron-gradient);
+}
+
+.bg-hero-gradient {
+  background: var(--hero-gradient);
+}
+
+button,
+input,
+select,
+textarea {
+  transition:
+    color 160ms ease,
+    background-color 160ms ease,
+    border-color 160ms ease,
+    box-shadow 160ms ease,
+    transform 160ms ease;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--primary) 65%, white 35%);
+  outline-offset: 2px;
 }
