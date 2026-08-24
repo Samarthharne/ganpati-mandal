@@ -88,6 +88,7 @@ function canManageEvents(role: Role) {
 
 export function GanpatiApp() {
   const store = useAppStore();
+  const [ready, setReady] = useState(false);
   const currentUser = useMemo(
     () => store.users.find((u) => u.id === store.currentUserId) ?? null,
     [store.users, store.currentUserId],
@@ -96,6 +97,45 @@ export function GanpatiApp() {
   useEffect(() => {
     document.documentElement.classList.toggle("dark", store.darkMode);
   }, [store.darkMode]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const start = async () => {
+      await useAppStore.getState().syncFromCloud();
+      if (!cancelled) setReady(true);
+    };
+    if (!useAppStore.persist) {
+      void start();
+    } else if (useAppStore.persist.hasHydrated()) {
+      void start();
+    }
+    const unsubHydrate = useAppStore.persist?.onFinishHydration?.(() => {
+      void start();
+    }) ?? (() => undefined);
+    const unlisten = useAppStore.getState().listenToCloud();
+    const refresh = () => {
+      void useAppStore.getState().syncFromCloud();
+    };
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      cancelled = true;
+      unsubHydrate();
+      unlisten();
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, []);
+
+  if (!ready) {
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center bg-[var(--app-bg)] px-4 text-center">
+        <div className="grid size-20 place-items-center rounded-3xl bg-[var(--saffron-gradient)] text-4xl text-white shadow-lg">🕉️</div>
+        <p className="mt-5 text-lg font-semibold">Connecting to your Mandals...</p>
+        <p className="mt-2 text-sm text-[var(--muted)]">Loading shared data so phone and laptop stay in sync.</p>
+      </div>
+    );
+  }
 
   if (!currentUser) {
     return <LoginScreen />;
@@ -114,14 +154,17 @@ function LoginScreen() {
   const [phone, setPhone] = useState("");
   const [email, setEmail] = useState("");
   const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
 
-  const handleLogin = () => {
+  const handleLogin = async () => {
     setError("");
     if (!username || !password) {
       setError("Please enter both username and password.");
       return;
     }
-    const user = store.login(username, password);
+    setBusy(true);
+    const user = await store.login(username, password);
+    setBusy(false);
     if (!user) {
       setError("Invalid username or password.");
     } else {
@@ -129,7 +172,7 @@ function LoginScreen() {
     }
   };
 
-  const handleRegister = () => {
+  const handleRegister = async () => {
     setError("");
     if (!name || !username || !password) {
       setError("Name, username, and password are required.");
@@ -139,7 +182,9 @@ function LoginScreen() {
       setError("Password must be at least 4 characters.");
       return;
     }
-    const user = store.register({ name, phone, email, username, password });
+    setBusy(true);
+    const user = await store.register({ name, phone, email, username, password });
+    setBusy(false);
     if (!user) {
       setError("Username already taken. Try a different one.");
     } else {
@@ -160,6 +205,7 @@ function LoginScreen() {
           <div className="mx-auto grid size-20 place-items-center rounded-3xl bg-[var(--saffron-gradient)] text-4xl text-white shadow-lg">🕉️</div>
           <h1 className="mt-5 text-3xl font-bold text-[var(--foreground)]">Ganpati Mandal</h1>
           <p className="mt-2 text-[var(--muted)]">Manage your Mandal community</p>
+          <CloudStatusMessage />
         </div>
 
         <Card>
@@ -217,8 +263,9 @@ function LoginScreen() {
           )}
 
           <PrimaryButton
-            label={mode === "login" ? "Login" : "Create Account"}
+            label={busy ? "Please wait..." : mode === "login" ? "Login" : "Create Account"}
             onClick={mode === "login" ? handleLogin : handleRegister}
+            disabled={busy}
             className="mt-5 w-full"
           />
         </Card>
@@ -564,8 +611,8 @@ function MainApp({ user }: { user: User }) {
       <JoinByCodeSheet
         open={showJoinByCode}
         onOpenChange={setShowJoinByCode}
-        onSubmit={(code) => {
-          const result = store.requestJoinByCode(code);
+        onSubmit={async (code) => {
+          const result = await store.requestJoinByCode(code);
           if (result === "success") toast.success("Join request sent. Wait for admin approval.");
           else if (result === "pending") toast.info("You already have a pending request for this Mandal.");
           else if (result === "already_member") toast.info("You are already a member of this Mandal.");
@@ -885,6 +932,7 @@ function MandalLandingScreen({
 
   return (
     <div className="mx-auto flex w-full max-w-5xl flex-col gap-5">
+      <CloudStatusMessage />
       {user.isAdmin && (
         <Card className="border-red-200 bg-red-50">
           <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1859,10 +1907,35 @@ function FeedbackSheet({
   );
 }
 
-function JoinByCodeSheet({ open, onOpenChange, onSubmit }: { open: boolean; onOpenChange: (v: boolean) => void; onSubmit: (code: string) => boolean }) {
+function CloudStatusMessage() {
+  const store = useAppStore();
+  if (!store.cloudEnabled) {
+    return (
+      <p className="mt-3 rounded-2xl bg-amber-50 px-3 py-2 text-sm text-amber-800">
+        Cloud sync is not set up yet. Mandals stay on this device only until you add the Supabase keys.
+      </p>
+    );
+  }
+  if (store.cloudStatus === "error") {
+    return (
+      <p className="mt-3 rounded-2xl bg-red-50 px-3 py-2 text-sm text-red-700">
+        {store.cloudError || "Could not connect to shared storage."}
+      </p>
+    );
+  }
+  return (
+    <p className="mt-3 text-sm text-emerald-700">Shared cloud is on. Phone and laptop use the same Mandals.</p>
+  );
+}
+
+function JoinByCodeSheet({ open, onOpenChange, onSubmit }: { open: boolean; onOpenChange: (v: boolean) => void; onSubmit: (code: string) => Promise<boolean> | boolean }) {
   const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
   useEffect(() => {
-    if (!open) setCode("");
+    if (!open) {
+      setCode("");
+      setBusy(false);
+    }
   }, [open]);
   return (
     <BottomSheet open={open} onOpenChange={onOpenChange} title="Join with Mandal Code" description="Enter the 6-character code shared by the Mandal admin.">
@@ -1871,14 +1944,17 @@ function JoinByCodeSheet({ open, onOpenChange, onSubmit }: { open: boolean; onOp
         <p className="text-sm text-[var(--muted)]">Your join request will be sent for admin approval.</p>
       </div>
       <PrimaryButton
-        label="Send Join Request"
+        label={busy ? "Checking code..." : "Send Join Request"}
+        disabled={busy}
         className="mt-5 w-full"
-        onClick={() => {
+        onClick={async () => {
           if (!code.trim()) {
             toast.error("Please enter a Mandal code.");
             return;
           }
-          const success = onSubmit(code.trim());
+          setBusy(true);
+          const success = await onSubmit(code.trim());
+          setBusy(false);
           if (success) onOpenChange(false);
         }}
       />
@@ -2007,7 +2083,7 @@ function JoinRequestPreview({ request, onApprove }: { request: JoinRequest; onAp
 function EmptyState({ title, description, actionLabel, onAction }: { title: string; description: string; actionLabel?: string; onAction?: () => void }) { return <Card className="border-dashed text-center"><p className="text-lg font-semibold">{title}</p><p className="mt-2 text-sm text-[var(--muted)]">{description}</p>{actionLabel && onAction && <button onClick={onAction} className="mt-4 rounded-2xl bg-[var(--foreground)] px-4 py-3 text-sm font-medium text-white">{actionLabel}</button>}</Card>; }
 function EmptyCompact({ text }: { text: string }) { return <p className="mt-3 text-sm text-[var(--muted)]">{text}</p>; }
 function QuickActionButton({ icon: Icon, label, onClick, prominent }: { icon: typeof Plus; label: string; onClick: () => void; prominent?: boolean }) { return <motion.button whileTap={{ scale: 0.97 }} onClick={onClick} className={cn("rounded-[24px] p-4 text-left shadow-sm", prominent ? "bg-[var(--foreground)] text-white" : "bg-[var(--soft-orange)] text-[var(--foreground)]")}><Icon className="size-5" /><p className="mt-3 text-base font-semibold">{label}</p></motion.button>; }
-function PrimaryButton({ label, onClick, icon: Icon, className }: { label: string; onClick: () => void; icon?: typeof Plus; className?: string }) { return <button onClick={onClick} className={cn("inline-flex items-center justify-center gap-2 rounded-2xl bg-[var(--foreground)] px-4 py-3 text-sm font-semibold text-white", className)}>{Icon && <Icon className="size-4" />}{label}</button>; }
+function PrimaryButton({ label, onClick, icon: Icon, className, disabled }: { label: string; onClick: () => void; icon?: typeof Plus; className?: string; disabled?: boolean }) { return <button type="button" disabled={disabled} onClick={onClick} className={cn("inline-flex items-center justify-center gap-2 rounded-2xl bg-[var(--foreground)] px-4 py-3 text-sm font-semibold text-white disabled:opacity-60", className)}>{Icon && <Icon className="size-4" />}{label}</button>; }
 function SecondaryButton({ label, onClick, icon: Icon, className }: { label: string; onClick: () => void; icon?: typeof Search; className?: string }) { return <button onClick={onClick} className={cn("inline-flex items-center justify-center gap-2 rounded-2xl border border-[var(--border)] bg-white px-4 py-3 text-sm font-semibold", className)}>{Icon && <Icon className="size-4" />}{label}</button>; }
 function SettingsRow({ title, description, action }: { title: string; description: string; action: ReactNode }) { return <div className="flex items-center justify-between gap-3 rounded-[22px] border border-[var(--border)] p-4"><div><p className="font-semibold">{title}</p><p className="mt-1 text-sm text-[var(--muted)]">{description}</p></div>{action}</div>; }
 function BudgetCard({ item }: { item: BudgetItem }) { const r = item.allocated ? (item.spent / item.allocated) * 100 : 0; const t = r > 100 ? "bg-red-500" : r > 80 ? "bg-amber-500" : "bg-emerald-500"; return <Card><div className="flex items-center justify-between gap-3"><div><p className="text-lg font-semibold">{item.category}</p><p className="mt-2 text-sm text-[var(--muted)]">{formatCurrency(item.spent)} / {formatCurrency(item.allocated)}</p></div><Badge>{Math.round(r)}%</Badge></div><div className="mt-4 h-3 overflow-hidden rounded-full bg-zinc-100"><div className={cn("h-full rounded-full", t)} style={{ width: `${Math.min(r, 100)}%` }} /></div></Card>; }

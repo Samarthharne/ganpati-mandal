@@ -1,6 +1,16 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
+import {
+  applyCloudRecordChange,
+  hasCloudMigrated,
+  isCloudEnabled,
+  markCloudMigrated,
+  pullCloudState,
+  pushAllCollections,
+  scheduleCloudPush,
+  subscribeToCloud,
+} from "@/lib/cloud";
 import { createEmptyAppData } from "@/lib/demo-data";
 import {
   ActivityItem,
@@ -35,10 +45,17 @@ import {
 import { canTransitionActivity, emailsMatch, joinRequestBelongsToUser, membershipBelongsToUser, migrateActivityStatus, needsActivityApproval, normalizeRole } from "@/lib/permissions";
 
 type Submitter = { userId: string; name: string; role: Role };
+type JoinByCodeResult = "not_found" | "already_member" | "pending" | "owner" | "success";
+type CloudStatus = "local" | "syncing" | "ready" | "error";
 
 type AppState = AppData & {
-  login: (username: string, password: string) => User | null;
-  register: (payload: { name: string; phone: string; email: string; username: string; password: string }) => User | null;
+  cloudEnabled: boolean;
+  cloudStatus: CloudStatus;
+  cloudError: string | null;
+  syncFromCloud: () => Promise<void>;
+  listenToCloud: () => () => void;
+  login: (username: string, password: string) => Promise<User | null>;
+  register: (payload: { name: string; phone: string; email: string; username: string; password: string }) => Promise<User | null>;
   logout: () => void;
   resetData: () => void;
   setCurrentMandal: (mandalId: string | null) => void;
@@ -50,7 +67,7 @@ type AppState = AppData & {
   updateMemberRole: (membershipId: string, role: Role) => void;
   removeMember: (membershipId: string) => void;
   submitJoinRequest: (payload: Omit<JoinRequest, "id" | "createdAt" | "updatedAt" | "status" | "requestedAt">) => void;
-  requestJoinByCode: (code: string) => "not_found" | "already_member" | "pending" | "owner" | "success";
+  requestJoinByCode: (code: string) => Promise<JoinByCodeResult>;
   updateJoinRequestStatus: (requestId: string, status: "APPROVED" | "REJECTED") => void;
   addFinanceCategory: (mandalId: string, type: FinanceCategory["type"], name: string) => void;
   removeFinanceCategory: (categoryId: string) => void;
@@ -70,6 +87,39 @@ type AppState = AppData & {
 };
 
 const initialData = createEmptyAppData();
+let applyingRemote = false;
+
+function persistableSlice(state: AppState) {
+  const session = {
+    currentUserId: state.currentUserId,
+    currentMandalId: state.currentMandalId,
+    demoRole: state.demoRole,
+    darkMode: state.darkMode,
+  };
+  if (isCloudEnabled() && hasCloudMigrated()) {
+    return session;
+  }
+  return {
+    ...session,
+    users: state.users,
+    mandals: state.mandals,
+    memberships: state.memberships,
+    joinRequests: state.joinRequests,
+    donations: state.donations,
+    expenses: state.expenses,
+    budgets: state.budgets,
+    events: state.events,
+    volunteers: state.volunteers,
+    vendors: state.vendors,
+    inventory: state.inventory,
+    poojas: state.poojas,
+    prasads: state.prasads,
+    notifications: state.notifications,
+    activities: state.activities,
+    financeCategories: state.financeCategories,
+    feedbacks: state.feedbacks,
+  };
+}
 
 const LEGACY_DEFAULT_CATEGORY_NAMES = new Set([
   ...DEFAULT_DONATION_CATEGORIES,
@@ -268,8 +318,53 @@ export const useAppStore = create<AppState>()(
   persist(
     (set, get) => ({
       ...initialData,
+      cloudEnabled: isCloudEnabled(),
+      cloudStatus: isCloudEnabled() ? "syncing" : "local",
+      cloudError: null,
 
-      login: (username, password) => {
+      syncFromCloud: async () => {
+        if (!isCloudEnabled()) {
+          set({ cloudStatus: "local", cloudError: null });
+          return;
+        }
+        set({ cloudStatus: "syncing" });
+        const pulled = await pullCloudState();
+        if (pulled.error) {
+          set({ cloudStatus: "error", cloudError: pulled.error });
+          return;
+        }
+        if (!hasCloudMigrated()) {
+          await pushAllCollections(get());
+          markCloudMigrated();
+          const latest = await pullCloudState();
+          if (latest.error) {
+            set({ cloudStatus: "error", cloudError: latest.error });
+            return;
+          }
+          applyingRemote = true;
+          set({ ...latest.data, cloudStatus: "ready", cloudError: null });
+          applyingRemote = false;
+          return;
+        }
+        applyingRemote = true;
+        set({ ...pulled.data, cloudStatus: "ready", cloudError: null });
+        applyingRemote = false;
+      },
+
+      listenToCloud: () =>
+        subscribeToCloud((change) => {
+          applyingRemote = true;
+          set((state) => ({
+            [change.collection]: applyCloudRecordChange(
+              state[change.collection] as { id: string }[],
+              change,
+            ),
+          }));
+          applyingRemote = false;
+        }),
+
+      login: async (username, password) => {
+        await get().syncFromCloud();
         const user = get().users.find(
           (u) => u.username === username && u.password === password,
         );
@@ -280,7 +375,8 @@ export const useAppStore = create<AppState>()(
         return null;
       },
 
-      register: (payload) => {
+      register: async (payload) => {
+        await get().syncFromCloud();
         const existing = get().users.find((u) => u.username === payload.username);
         if (existing) return null;
         const user: User = {
@@ -448,7 +544,8 @@ export const useAppStore = create<AppState>()(
             ...state.notifications,
           ],
         })),
-      requestJoinByCode: (code) => {
+      requestJoinByCode: async (code) => {
+        await get().syncFromCloud();
         const state = get();
         const currentUser = state.users.find((u) => u.id === state.currentUserId);
         if (!currentUser) return "not_found" as const;
@@ -772,8 +869,19 @@ export const useAppStore = create<AppState>()(
     }),
     {
       name: "ganpati-mandal-storage",
-      version: 9,
+      version: 10,
       migrate: (persistedState) => sanitizePersistedData(persistedState),
+      partialize: persistableSlice,
     },
   ),
 );
+
+if (typeof window !== "undefined") {
+  let previous = useAppStore.getState();
+  useAppStore.subscribe((state) => {
+    if (!applyingRemote && isCloudEnabled()) {
+      scheduleCloudPush(previous, state);
+    }
+    previous = state;
+  });
+}
